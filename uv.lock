@@ -485,10 +485,14 @@ airflow = [
 ]
 dev = [
     { name = "jupyter" },
-    { name = "matplotlib" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "seaborn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "matplotlib" },
 ]
 
 [package.metadata]
@@ -500,7 +504,6 @@ requires-dist = [
     { name = "joblib", specifier = ">=1.4.2" },
     { name = "jupyter", marker = "extra == 'dev'", specifier = ">=1.1.1" },
     { name = "loguru", specifier = ">=0.7.2" },
-    { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.9.2" },
     { name = "mlflow", specifier = ">=2.16.2" },
     { name = "numpy", specifier = ">=2.1.0" },
     { name = "pandas", specifier = ">=2.2.3" },
@@ -515,6 +518,9 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 provides-extras = ["airflow", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "matplotlib", specifier = ">=3.10.8" }]
 
 [[package]]
 name = "certifi"
