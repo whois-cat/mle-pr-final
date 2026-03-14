@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 COPY src ./src
 
-RUN pip install --no-cache-dir uv && \
-    uv sync --frozen
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir .
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "cart_driven_recsys.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "cart_driven_recsys.api:app", "--host", "0.0.0.0", "--port", "8000"]
