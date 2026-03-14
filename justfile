@@ -1,56 +1,37 @@
-set dotenv-load := true
+set shell := ["bash", "-cu"]
 
-default:
-    @just --list
+compose := "docker compose"
 
-install:
-    uv sync
+up:
+    {{compose}} up -d
 
-etl:
-    uv run python -m cart_driven_recsys.etl
+down:
+    {{compose}} down
 
-train:
-    uv run python -m cart_driven_recsys.train
+build:
+    {{compose}} build
 
-serve:
-    uv run python -m cart_driven_recsys.api
-
-airflow-web:
-    uv run airflow webserver --port 8080
-
-airflow-scheduler:
-    uv run airflow scheduler
-
-airflow-init:
-    uv run airflow db migrate
-
-mlflow:
-    mlflow server \
-        --host 0.0.0.0 \
-        --port 5000 \
-        --backend-store-uri ./mlruns \
-        --default-artifact-root ./artifacts/models
-
-docker-up:
-    docker compose up --build -d
-
-docker-down:
-    docker compose down
-
-docker-reset:
-    docker compose down -v
+rebuild:
+    {{compose}} down
+    {{compose}} build --no-cache
+    {{compose}} up -d
 
 logs:
-    docker compose logs -f
+    {{compose}} logs -f
 
-api-logs:
-    docker compose logs -f recsys-api
+api:
+    {{compose}} up -d recsys-api
 
-airflow-logs:
-    docker compose logs -f airflow-webserver airflow-scheduler
+train:
+    {{compose}} exec airflow-webserver airflow dags trigger cart_recsys_train
 
-fmt:
-    uv run ruff format .
+test:
+    pytest -q
 
-lint:
-    uv run ruff check .
+health:
+    {{compose}} ps
+    echo "airflow: http://localhost:8080"
+    echo "mlflow: http://localhost:5000"
+    echo "api: http://localhost:8000/docs"
+    echo "grafana: http://localhost:3000"
+    echo "prom: http://localhost:9090"

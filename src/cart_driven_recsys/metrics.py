@@ -1,5 +1,5 @@
 from __future__ import annotations
-import time
+
 from prometheus_client import Counter, Histogram
 
 
@@ -40,18 +40,3 @@ TRAINING_DURATION_SECONDS = Histogram(
     "recsys_training_duration_seconds",
     "Total training duration in seconds",
 )
-
-
-class RequestTimer:
-    def __init__(self, *, path: str, method: str):
-        self.path = path
-        self.method = method
-        self._start = 0.0
-
-    def __enter__(self):
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        duration = time.perf_counter() - self._start
-        HTTP_REQUEST_DURATION_SECONDS.labels(path=self.path, method=self.method).observe(duration)
