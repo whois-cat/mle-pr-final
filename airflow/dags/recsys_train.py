@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+
 from airflow.decorators import dag, task
-from cart_driven_recsys.config import cfg
 
 
 @dag(
@@ -17,6 +17,8 @@ from cart_driven_recsys.config import cfg
 def cart_recsys_train_dag():
     @task
     def check_processed() -> None:
+        from cart_driven_recsys.config import cfg
+
         required_paths = [
             cfg.events_clean_dir,
             cfg.purchases_parquet,
@@ -40,6 +42,8 @@ def cart_recsys_train_dag():
 
     @task
     def validate_model_artifact(model_path: str) -> None:
+        from cart_driven_recsys.config import cfg
+
         if not cfg.model_artifact.exists():
             raise FileNotFoundError(f"model artifact not found: {cfg.model_artifact}")
 

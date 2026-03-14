@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import duckdb
@@ -11,11 +12,24 @@ import pandas as pd
 from implicit.als import AlternatingLeastSquares
 from scipy import sparse
 
-from cart_driven_recsys.config import cfg
 from cart_driven_recsys import sql
+from cart_driven_recsys.config import cfg
+from cart_driven_recsys.covisit import build_covisit_index
+from cart_driven_recsys.recommenders import (
+    build_item_popularity_ranking,
+    evaluate_recommender,
+    recommend_with_hybrid,
+    sample_sessions,
+)
 
 
 logger = logging.getLogger(__name__)
+
+ALS_FACTORS = 128
+COVISIT_TOP_NEIGHBORS = 50
+HYBRID_ALS_WEIGHT = 0.7
+HYBRID_COVISIT_WEIGHT = 0.3
+HYBRID_RRF_CONSTANT = 60
 
 
 @dataclass
@@ -24,195 +38,108 @@ class TrainingResult:
     model_path: str
 
 
-def _connect() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect()
-
-
-def load_interactions() -> pd.DataFrame:
-    connection = _connect()
+def _query_dataframe(sql_query: str) -> pd.DataFrame:
+    database_connection = duckdb.connect()
     try:
-        interactions = connection.execute(
-            sql.interactions_sql(
-                events_clean_dir=cfg.events_clean_dir,
-                weight_view=cfg.s.weight_view,
-                weight_addtocart=cfg.s.weight_addtocart,
-                weight_transaction=cfg.s.weight_transaction,
-            )
-        ).df()
+        return database_connection.execute(sql_query).df()
     finally:
-        connection.close()
+        database_connection.close()
 
-    interactions["event_time"] = pd.to_datetime(interactions["event_time"], utc=True)
 
-    grouped = (
-        interactions.groupby(["user_id", "item_id"], as_index=False)
+def load_weighted_events() -> pd.DataFrame:
+    weighted_events = _query_dataframe(
+        sql.interactions_sql(
+            events_clean_dir=cfg.events_clean_dir,
+            weight_view=cfg.s.weight_view,
+            weight_addtocart=cfg.s.weight_addtocart,
+            weight_transaction=cfg.s.weight_transaction,
+        )
+    )
+
+    weighted_events["event_time"] = pd.to_datetime(weighted_events["event_time"], utc=True)
+    return weighted_events
+
+
+def load_raw_addtocart_events() -> pd.DataFrame:
+    raw_addtocart_events = _query_dataframe(
+        sql.raw_addtocart_events_sql(cfg.events_clean_dir)
+    )
+
+    raw_addtocart_events["event_time"] = pd.to_datetime(
+        raw_addtocart_events["event_time"],
+        utc=True,
+    )
+    return raw_addtocart_events
+
+
+def aggregate_interactions(weighted_events: pd.DataFrame) -> pd.DataFrame:
+    if weighted_events.empty:
+        return pd.DataFrame(columns=["user_id", "item_id", "weight", "last_event_time"])
+
+    return (
+        weighted_events.groupby(["user_id", "item_id"], as_index=False)
         .agg(
             weight=("weight", "sum"),
             last_event_time=("event_time", "max"),
         )
     )
 
-    return grouped
-
-
-def load_raw_addtocart_events() -> pd.DataFrame:
-    connection = _connect()
-    try:
-        events = connection.execute(sql.raw_addtocart_events_sql(cfg.events_clean_dir)).df()
-    finally:
-        connection.close()
-
-    events["event_time"] = pd.to_datetime(events["event_time"], utc=True)
-    return events
-
-
-def load_popular_items(top_k: int | None = None) -> list[int]:
-    connection = _connect()
-
-    try:
-        popular_items = connection.execute(
-            sql.popular_items_sql(
-                events_clean_dir=cfg.events_clean_dir,
-                weight_view=cfg.s.weight_view,
-                weight_addtocart=cfg.s.weight_addtocart,
-                weight_transaction=cfg.s.weight_transaction,
-            )
-        ).df()
-    finally:
-        connection.close()
-
-    if top_k is None:
-        top_k = cfg.s.popular_items_count
-
-    return popular_items["item_id"].head(top_k).astype(int).tolist()
-
 
 def split_by_time(
-    interactions: pd.DataFrame,
+    weighted_events: pd.DataFrame,
     test_days: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
-    if interactions.empty:
-        raise ValueError("interactions dataframe is empty")
+    if weighted_events.empty:
+        raise ValueError("weighted events dataframe is empty")
 
-    cutoff = interactions["last_event_time"].max() - pd.Timedelta(days=test_days)
-    train_df = interactions[interactions["last_event_time"] < cutoff].copy()
+    cutoff_timestamp = weighted_events["event_time"].max() - pd.Timedelta(days=test_days)
+
+    train_weighted_events = weighted_events[weighted_events["event_time"] < cutoff_timestamp].copy()
+    if train_weighted_events.empty:
+        raise ValueError("train weighted events dataframe is empty after time split")
+
+    train_interactions = aggregate_interactions(train_weighted_events)
 
     test_events = load_raw_addtocart_events()
-    test_events = test_events[test_events["event_time"] >= cutoff].copy()
+    test_events = test_events[test_events["event_time"] >= cutoff_timestamp].copy()
 
-    return train_df, test_events, cutoff
+    return train_interactions, test_events, cutoff_timestamp
 
 
 def build_interaction_matrix(
-    train_df: pd.DataFrame,
+    train_interactions: pd.DataFrame,
 ) -> tuple[sparse.csr_matrix, np.ndarray, np.ndarray]:
-    if train_df.empty:
-        raise ValueError("train dataframe is empty")
+    if train_interactions.empty:
+        raise ValueError("train interactions dataframe is empty")
 
-    user_ids = np.sort(train_df["user_id"].unique())
-    item_ids = np.sort(train_df["item_id"].unique())
+    user_ids = np.sort(train_interactions["user_id"].unique())
+    item_ids = np.sort(train_interactions["item_id"].unique())
 
-    user_id_to_index = {user_id: index for index, user_id in enumerate(user_ids)}
-    item_id_to_index = {item_id: index for index, item_id in enumerate(item_ids)}
+    user_id_to_index = {
+        int(user_id): user_index
+        for user_index, user_id in enumerate(user_ids)
+    }
+    item_id_to_index = {
+        int(item_id): item_index
+        for item_index, item_id in enumerate(item_ids)
+    }
 
-    row_indices = train_df["user_id"].map(user_id_to_index).to_numpy()
-    col_indices = train_df["item_id"].map(item_id_to_index).to_numpy()
-    values = train_df["weight"].astype(np.float32).to_numpy()
+    row_indices = train_interactions["user_id"].map(user_id_to_index).to_numpy()
+    column_indices = train_interactions["item_id"].map(item_id_to_index).to_numpy()
+    values = train_interactions["weight"].astype(np.float32).to_numpy()
 
-    matrix = sparse.csr_matrix(
-        (values, (row_indices, col_indices)),
+    interaction_matrix = sparse.csr_matrix(
+        (values, (row_indices, column_indices)),
         shape=(len(user_ids), len(item_ids)),
         dtype=np.float32,
     )
 
-    return matrix, user_ids, item_ids
-
-
-def build_sessions_from_events(events: pd.DataFrame, gap_hours: int) -> list[list[int]]:
-    if events.empty:
-        return []
-
-    ordered_events = events.sort_values(["user_id", "event_time"]).copy()
-    session_gap = pd.Timedelta(hours=gap_hours)
-
-    ordered_events["prev_event_time"] = ordered_events.groupby("user_id")["event_time"].shift()
-    ordered_events["is_new_session"] = (
-        ordered_events["prev_event_time"].isna()
-        | ((ordered_events["event_time"] - ordered_events["prev_event_time"]) > session_gap)
-    )
-    ordered_events["session_id"] = ordered_events.groupby("user_id")["is_new_session"].cumsum()
-
-    sessions_df = (
-        ordered_events.groupby(["user_id", "session_id"], sort=False)["item_id"]
-        .agg(list)
-        .reset_index()
-    )
-
-    return [items for items in sessions_df["item_id"] if len(items) >= 2]
-
-
-def evaluate(
-    model: AlternatingLeastSquares,
-    item_ids: np.ndarray,
-    test_events: pd.DataFrame,
-    k: int,
-    n_sessions: int,
-    gap_hours: int,
-) -> dict[str, float | int]:
-    sessions = build_sessions_from_events(test_events, gap_hours=gap_hours)
-
-    if not sessions:
-        return {f"hit@{k}": 0.0, "mrr": 0.0, "n_sessions": 0}
-
-    rng = np.random.default_rng(42)
-    sampled_indices = rng.choice(len(sessions), size=min(n_sessions, len(sessions)), replace=False)
-    sampled_sessions = [sessions[index] for index in sampled_indices]
-
-    item_id_to_index = {item_id: index for index, item_id in enumerate(item_ids)}
-    
-    hit_scores: list[float] = []
-    reciprocal_ranks: list[float] = []
-
-    for session in sampled_sessions:
-        cart_item_ids = session[:-1]
-        target_item_id = session[-1]
-
-        cart_indices = [item_id_to_index[item_id] for item_id in cart_item_ids if item_id in item_id_to_index]
-
-        if not cart_indices or target_item_id not in item_id_to_index:
-            hit_scores.append(0.0)
-            reciprocal_ranks.append(0.0)
-            continue
-
-        user_vector = model.item_factors[cart_indices].mean(axis=0)
-        scores = model.item_factors @ user_vector
-
-        for item_id in cart_item_ids:
-            if item_id in item_id_to_index:
-                scores[item_id_to_index[item_id]] = -np.inf
-
-        top_indices = np.argpartition(scores, -k)[-k:]
-        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-        recommended_item_ids = item_ids[top_indices].tolist()
-
-        if target_item_id in recommended_item_ids:
-            rank = recommended_item_ids.index(target_item_id) + 1
-            hit_scores.append(1.0)
-            reciprocal_ranks.append(1.0 / rank)
-        else:
-            hit_scores.append(0.0)
-            reciprocal_ranks.append(0.0)
-
-    return {
-        f"hit@{k}": float(np.mean(hit_scores)),
-        "mrr": float(np.mean(reciprocal_ranks)),
-        "n_sessions": len(sampled_sessions),
-    }
+    return interaction_matrix, user_ids, item_ids
 
 
 def train_als_model(interaction_matrix: sparse.csr_matrix) -> AlternatingLeastSquares:
     model = AlternatingLeastSquares(
-        factors=cfg.s.als_factors,
+        factors=ALS_FACTORS,
         iterations=cfg.s.als_iterations,
         regularization=cfg.s.als_regularization,
         alpha=cfg.s.als_alpha,
@@ -226,23 +153,29 @@ def train_als_model(interaction_matrix: sparse.csr_matrix) -> AlternatingLeastSq
 
 def save_model_artifact(
     model: AlternatingLeastSquares,
-    user_ids: np.ndarray,
     item_ids: np.ndarray,
     popular_items: list[int],
-    cutoff: pd.Timestamp,
+    covisit_index: dict[int, list[tuple[int, float]]],
+    cutoff_timestamp: pd.Timestamp,
     interaction_matrix: sparse.csr_matrix,
 ) -> None:
     artifact = {
-        "model": model,
-        "item_factors": model.item_factors,
-        "user_factors": model.user_factors,
-        "user_ids": user_ids,
+        "model_type": "hybrid_als_covisit",
+        "als_model": model,
         "item_ids": item_ids,
         "popular_items": popular_items,
+        "covisit_index": covisit_index,
+        "hybrid_params": {
+            "als_weight": HYBRID_ALS_WEIGHT,
+            "covisit_weight": HYBRID_COVISIT_WEIGHT,
+            "rrf_constant": HYBRID_RRF_CONSTANT,
+        },
         "train_meta": {
-            "cutoff_date": str(cutoff.date()),
+            "cutoff_date": str(cutoff_timestamp.date()),
             "n_users": int(interaction_matrix.shape[0]),
             "n_items": int(interaction_matrix.shape[1]),
+            "als_factors": ALS_FACTORS,
+            "covisit_top_neighbors": COVISIT_TOP_NEIGHBORS,
         },
     }
 
@@ -250,7 +183,25 @@ def save_model_artifact(
     joblib.dump(artifact, cfg.model_artifact)
 
 
+def sanitize_metric_names_for_mlflow(metrics: dict[str, float | int]) -> dict[str, float]:
+    sanitized_metrics: dict[str, float] = {}
+
+    for metric_name, metric_value in metrics.items():
+        if not isinstance(metric_value, (int, float)):
+            continue
+
+        safe_metric_name = metric_name.replace("@", "_at_")
+        safe_metric_name = re.sub(r"[^a-zA-Z0-9_\-./ ]", "_", safe_metric_name)
+        sanitized_metrics[safe_metric_name] = float(metric_value)
+
+    return sanitized_metrics
+
+
 def log_to_mlflow(metrics: dict[str, float | int]) -> None:
+    if not cfg.mlflow_tracking_uri:
+        logger.info("train: skip mlflow logging because tracking uri is empty")
+        return
+
     mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
     mlflow.set_experiment(cfg.s.mlflow_experiment)
 
@@ -260,10 +211,14 @@ def log_to_mlflow(metrics: dict[str, float | int]) -> None:
                 "weight_view": cfg.s.weight_view,
                 "weight_addtocart": cfg.s.weight_addtocart,
                 "weight_transaction": cfg.s.weight_transaction,
-                "als_factors": cfg.s.als_factors,
+                "als_factors": ALS_FACTORS,
                 "als_iterations": cfg.s.als_iterations,
                 "als_regularization": cfg.s.als_regularization,
                 "als_alpha": cfg.s.als_alpha,
+                "covisit_top_neighbors": COVISIT_TOP_NEIGHBORS,
+                "hybrid_als_weight": HYBRID_ALS_WEIGHT,
+                "hybrid_covisit_weight": HYBRID_COVISIT_WEIGHT,
+                "hybrid_rrf_constant": HYBRID_RRF_CONSTANT,
                 "eval_test_days": cfg.s.eval_test_days,
                 "eval_session_gap_hours": cfg.s.eval_session_gap_hours,
                 "eval_k": cfg.s.eval_k,
@@ -271,58 +226,90 @@ def log_to_mlflow(metrics: dict[str, float | int]) -> None:
             }
         )
 
-        mlflow.log_metrics(
-            {
-                metric_name: float(metric_value)
-                for metric_name, metric_value in metrics.items()
-                if isinstance(metric_value, (int, float))
-            }
-        )
-
+        mlflow.log_metrics(sanitize_metric_names_for_mlflow(metrics))
         mlflow.log_artifact(str(cfg.model_artifact))
 
 
 def run_training() -> TrainingResult:
-    logger.info("train: load interactions")
-    interactions = load_interactions()
+    logger.info("train: load weighted events")
+    weighted_events = load_weighted_events()
 
     logger.info("train: split by time")
-    train_df, test_events, cutoff = split_by_time(
-        interactions=interactions,
+    train_interactions, test_events, cutoff_timestamp = split_by_time(
+        weighted_events=weighted_events,
         test_days=cfg.s.eval_test_days,
     )
 
     logger.info("train: build interaction matrix")
-    interaction_matrix, user_ids, item_ids = build_interaction_matrix(train_df)
+    interaction_matrix, user_ids, item_ids = build_interaction_matrix(train_interactions)
 
-    logger.info("train: load popular items")
-    popular_items = load_popular_items()
+    logger.info("train: build popularity ranking")
+    popular_items = build_item_popularity_ranking(train_interactions)
+
+    logger.info("train: load raw add-to-cart events")
+    raw_addtocart_events = load_raw_addtocart_events()
+    train_addtocart_events = raw_addtocart_events[
+        raw_addtocart_events["event_time"] < cutoff_timestamp
+    ].copy()
+
+    logger.info("train: build co-visitation index")
+    covisit_index = build_covisit_index(
+        train_events=train_addtocart_events,
+        gap_hours=cfg.s.eval_session_gap_hours,
+        top_neighbors_per_item=COVISIT_TOP_NEIGHBORS,
+    )
+
+    logger.info("train: sample sessions")
+    sampled_sessions = sample_sessions(
+        test_events= test_events,
+        gap_hours=cfg.s.eval_session_gap_hours,
+        n_sessions=cfg.s.eval_n_sessions,
+        random_seed=42,
+    )
 
     logger.info("train: fit als")
     model = train_als_model(interaction_matrix)
 
     logger.info("train: evaluate")
-    metrics = evaluate(
-        model=model,
-        item_ids=item_ids,
-        test_events=test_events,
+    item_id_to_index = {
+        int(item_id): item_index
+        for item_index, item_id in enumerate(item_ids)
+    }
+
+    metrics = evaluate_recommender(
+        recommend_function=lambda cart_item_ids, k: recommend_with_hybrid(
+            model=model,
+            item_ids=item_ids,
+            item_id_to_index=item_id_to_index,
+            covisit_index=covisit_index,
+            popular_items=popular_items,
+            cart_item_ids=cart_item_ids,
+            k=k,
+            als_weight=HYBRID_ALS_WEIGHT,
+            covisit_weight=HYBRID_COVISIT_WEIGHT,
+            rrf_constant=HYBRID_RRF_CONSTANT,
+        ),
+        sampled_sessions=sampled_sessions,
+        item_catalog_ids=item_ids,
+        popular_items=popular_items,
         k=cfg.s.eval_k,
-        n_sessions=cfg.s.eval_n_sessions,
-        gap_hours=cfg.s.eval_session_gap_hours,
     )
 
     logger.info("train: save model artifact")
     save_model_artifact(
         model=model,
-        user_ids=user_ids,
         item_ids=item_ids,
         popular_items=popular_items,
-        cutoff=cutoff,
+        covisit_index=covisit_index,
+        cutoff_timestamp=cutoff_timestamp,
         interaction_matrix=interaction_matrix,
     )
 
-    logger.info("train: log to mlflow")
-    log_to_mlflow(metrics)
+    try:
+        logger.info("train: log to mlflow")
+        log_to_mlflow(metrics)
+    except Exception:
+        logger.exception("train: mlflow logging failed")
 
     logger.info("train: done")
     for metric_name, metric_value in metrics.items():

@@ -1,4 +1,4 @@
-FROM apache/airflow:3.1.8
+FROM apache/airflow:2.11.1-python3.12
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -7,13 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 USER airflow
-WORKDIR /opt/airflow
+WORKDIR /opt/recsys
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 COPY src ./src
-COPY airflow ./airflow
 
-RUN pip install --no-cache-dir uv && \
-    uv sync --frozen --extra airflow
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir .
 
-ENV PYTHONPATH=/opt/airflow/src
+ENV PYTHONPATH=/opt/recsys/src

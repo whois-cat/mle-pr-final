@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_workers: int = 2
 
-    mlflow_tracking_uri: str = "http://127.0.0.1:5000"
+    mlflow_tracking_uri: str = "http://mlflow:5000"
     mlflow_experiment: str = "cart-driven-recsys"
 
 

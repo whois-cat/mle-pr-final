@@ -125,5 +125,8 @@ def run_all() -> None:
     write_success_flag()
     logger.info("etl: done")
 
+    cfg.success_flag.parent.mkdir(parents=True, exist_ok=True)
+    cfg.success_flag.write_text("ok\n", encoding="utf-8")
+
 if __name__ == "__main__":
     run_all()

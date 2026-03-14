@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
-from cart_driven_recsys.config import cfg
 
 
 @dag(
@@ -17,6 +16,8 @@ from cart_driven_recsys.config import cfg
 def cart_recsys_etl_dag():
     @task
     def check_raw() -> None:
+        from cart_driven_recsys.config import cfg
+
         required_files = [
             cfg.events_csv,
             cfg.item_props_csvs[0],
@@ -41,8 +42,9 @@ def cart_recsys_etl_dag():
 
     @task
     def validate_outputs() -> None:
+        from cart_driven_recsys.config import cfg
+
         required_outputs = [
-            cfg.events_clean_dir,
             cfg.purchases_parquet,
             cfg.items_parquet,
             cfg.categories_parquet,
@@ -58,4 +60,4 @@ def cart_recsys_etl_dag():
     check_raw() >> run_etl() >> validate_outputs()
 
 
-cart_recsys_etl_dag()
+cart_recsys_etl_dag()   
