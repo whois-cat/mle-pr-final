@@ -26,7 +26,7 @@ train:
     {{compose}} exec airflow-webserver airflow dags trigger cart_recsys_train
 
 test:
-    pytest -q
+    pytest -vv -ra --durations=10 --color=yes
 
 health:
     {{compose}} ps
