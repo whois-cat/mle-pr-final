@@ -1,44 +1,62 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
+
 import duckdb
-from cart_driven_recsys.config import cfg
+
 from cart_driven_recsys import sql
-import logging
+from cart_driven_recsys.config import cfg
+
 
 logger = logging.getLogger(__name__)
+
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
-    _ensure_dir(cfg.s.duckdb_path.parent)
-    return duckdb.connect(str(cfg.s.duckdb_path))
+    _ensure_dir(cfg.duckdb_path.parent)
+    return duckdb.connect(str(cfg.duckdb_path))
+
+
+def _replace_path(target_path: Path, temporary_path: Path) -> None:
+    if target_path.exists():
+        if target_path.is_dir():
+            shutil.rmtree(target_path)
+        else:
+            target_path.unlink()
+
+    temporary_path.rename(target_path)
 
 
 def _write_parquet(select_sql: str, output_path: Path, partition_by: str | None = None) -> Path:
     _ensure_dir(output_path.parent)
+    temporary_path = output_path.with_name(f"{output_path.name}.tmp")
 
-    tmp = output_path.with_name(f"{output_path.name}.tmp")
-    if tmp.exists():
-        shutil.rmtree(tmp) if tmp.is_dir() else tmp.unlink()
+    if temporary_path.exists():
+        if temporary_path.is_dir():
+            shutil.rmtree(temporary_path)
+        else:
+            temporary_path.unlink()
 
-    con = _connect()
+    database_connection = _connect()
     try:
         partition_clause = f", PARTITION_BY ({partition_by})" if partition_by else ""
-        con.execute(f"""
+        database_connection.execute(
+            f"""
             COPY ({select_sql})
-            TO '{str(tmp).replace(chr(92), '/')}' (FORMAT PARQUET, COMPRESSION ZSTD{partition_clause})
-        """)
+            TO '{str(temporary_path).replace(chr(92), '/')}'
+            (FORMAT PARQUET, COMPRESSION ZSTD{partition_clause})
+            """
+        )
     finally:
-        con.close()
+        database_connection.close()
 
-    if output_path.exists():
-        shutil.rmtree(output_path) if output_path.is_dir() else output_path.unlink()
-    tmp.rename(output_path)
+    _replace_path(target_path=output_path, temporary_path=temporary_path)
     return output_path
 
 
@@ -72,9 +90,9 @@ def build_categories() -> Path:
 
 
 def build_stats() -> Path:
-    con = _connect()
+    database_connection = _connect()
     try:
-        rows = con.execute(
+        stats_rows = database_connection.execute(
             sql.stats_sql(
                 events_clean_dir=cfg.events_clean_dir,
                 purchases_parquet=cfg.purchases_parquet,
@@ -83,26 +101,23 @@ def build_stats() -> Path:
             )
         ).fetchall()
     finally:
-        con.close()
+        database_connection.close()
 
-    stats = {metric: int(value) for metric, value in rows}
-
+    stats_payload = {metric_name: int(metric_value) for metric_name, metric_value in stats_rows}
     _ensure_dir(cfg.stats_json.parent)
-    tmp = cfg.stats_json.with_name(f"{cfg.stats_json.name}.tmp")
-    tmp.write_text(json.dumps(stats, indent=2), encoding="utf-8")
-    if cfg.stats_json.exists():
-        cfg.stats_json.unlink()
-    tmp.rename(cfg.stats_json)
+
+    temporary_path = cfg.stats_json.with_name(f"{cfg.stats_json.name}.tmp")
+    temporary_path.write_text(json.dumps(stats_payload, indent=2), encoding="utf-8")
+    _replace_path(target_path=cfg.stats_json, temporary_path=temporary_path)
     return cfg.stats_json
 
 
 def write_success_flag() -> Path:
     _ensure_dir(cfg.success_flag.parent)
-    tmp = cfg.success_flag.with_name(f"{cfg.success_flag.name}.tmp")
-    tmp.write_text("", encoding="utf-8")
-    if cfg.success_flag.exists():
-        cfg.success_flag.unlink()
-    tmp.rename(cfg.success_flag)
+
+    temporary_path = cfg.success_flag.with_name(f"{cfg.success_flag.name}.tmp")
+    temporary_path.write_text("ok\n", encoding="utf-8")
+    _replace_path(target_path=cfg.success_flag, temporary_path=temporary_path)
     return cfg.success_flag
 
 
@@ -122,11 +137,11 @@ def run_all() -> None:
     logger.info("etl: build stats")
     build_stats()
 
+    logger.info("etl: write success flag")
     write_success_flag()
+
     logger.info("etl: done")
 
-    cfg.success_flag.parent.mkdir(parents=True, exist_ok=True)
-    cfg.success_flag.write_text("ok\n", encoding="utf-8")
 
 if __name__ == "__main__":
     run_all()

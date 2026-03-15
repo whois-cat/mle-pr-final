@@ -25,11 +25,13 @@ from cart_driven_recsys.recommenders import (
 
 logger = logging.getLogger(__name__)
 
-ALS_FACTORS = 128
-COVISIT_TOP_NEIGHBORS = 50
-HYBRID_ALS_WEIGHT = 0.7
-HYBRID_COVISIT_WEIGHT = 0.3
-HYBRID_RRF_CONSTANT = 60
+weights = cfg.params["weights"]
+als_params = cfg.params["als"]
+covisit_params = cfg.params["covisit"]
+hybrid_params = cfg.params["hybrid"]
+eval_params = cfg.params["eval"]
+model_params = cfg.params["model"]
+popular_params = cfg.params["popular"]
 
 
 @dataclass
@@ -50,12 +52,11 @@ def load_weighted_events() -> pd.DataFrame:
     weighted_events = _query_dataframe(
         sql.interactions_sql(
             events_clean_dir=cfg.events_clean_dir,
-            weight_view=cfg.s.weight_view,
-            weight_addtocart=cfg.s.weight_addtocart,
-            weight_transaction=cfg.s.weight_transaction,
+            weight_view=weights["view"],
+            weight_addtocart=weights["addtocart"],
+            weight_transaction=weights["transaction"],
         )
     )
-
     weighted_events["event_time"] = pd.to_datetime(weighted_events["event_time"], utc=True)
     return weighted_events
 
@@ -64,7 +65,6 @@ def load_raw_addtocart_events() -> pd.DataFrame:
     raw_addtocart_events = _query_dataframe(
         sql.raw_addtocart_events_sql(cfg.events_clean_dir)
     )
-
     raw_addtocart_events["event_time"] = pd.to_datetime(
         raw_addtocart_events["event_time"],
         utc=True,
@@ -108,16 +108,16 @@ def split_by_time(
 
 def build_interaction_matrix(
     train_interactions: pd.DataFrame,
-) -> tuple[sparse.csr_matrix, np.ndarray, np.ndarray]:
+) -> tuple[sparse.csr_matrix, np.ndarray]:
     if train_interactions.empty:
         raise ValueError("train interactions dataframe is empty")
 
-    user_ids = np.sort(train_interactions["user_id"].unique())
+    unique_user_ids = np.sort(train_interactions["user_id"].unique())
     item_ids = np.sort(train_interactions["item_id"].unique())
 
     user_id_to_index = {
         int(user_id): user_index
-        for user_index, user_id in enumerate(user_ids)
+        for user_index, user_id in enumerate(unique_user_ids)
     }
     item_id_to_index = {
         int(item_id): item_index
@@ -126,23 +126,23 @@ def build_interaction_matrix(
 
     row_indices = train_interactions["user_id"].map(user_id_to_index).to_numpy()
     column_indices = train_interactions["item_id"].map(item_id_to_index).to_numpy()
-    values = train_interactions["weight"].astype(np.float32).to_numpy()
+    interaction_weights = train_interactions["weight"].astype(np.float32).to_numpy()
 
     interaction_matrix = sparse.csr_matrix(
-        (values, (row_indices, column_indices)),
-        shape=(len(user_ids), len(item_ids)),
+        (interaction_weights, (row_indices, column_indices)),
+        shape=(len(unique_user_ids), len(item_ids)),
         dtype=np.float32,
     )
 
-    return interaction_matrix, user_ids, item_ids
+    return interaction_matrix, item_ids
 
 
 def train_als_model(interaction_matrix: sparse.csr_matrix) -> AlternatingLeastSquares:
     model = AlternatingLeastSquares(
-        factors=ALS_FACTORS,
-        iterations=cfg.s.als_iterations,
-        regularization=cfg.s.als_regularization,
-        alpha=cfg.s.als_alpha,
+        factors=als_params["factors"],
+        iterations=als_params["iterations"],
+        regularization=als_params["regularization"],
+        alpha=als_params["alpha"],
         use_gpu=False,
         calculate_training_loss=True,
         random_state=42,
@@ -159,28 +159,28 @@ def save_model_artifact(
     cutoff_timestamp: pd.Timestamp,
     interaction_matrix: sparse.csr_matrix,
 ) -> None:
-    artifact = {
-        "model_type": "hybrid_als_covisit",
+    artifact_payload = {
+        "model_type": model_params["type"],
         "als_model": model,
         "item_ids": item_ids,
         "popular_items": popular_items,
         "covisit_index": covisit_index,
         "hybrid_params": {
-            "als_weight": HYBRID_ALS_WEIGHT,
-            "covisit_weight": HYBRID_COVISIT_WEIGHT,
-            "rrf_constant": HYBRID_RRF_CONSTANT,
+            "als_weight": hybrid_params["als_weight"],
+            "covisit_weight": hybrid_params["covisit_weight"],
+            "rrf_constant": hybrid_params["rrf_constant"],
         },
         "train_meta": {
             "cutoff_date": str(cutoff_timestamp.date()),
             "n_users": int(interaction_matrix.shape[0]),
             "n_items": int(interaction_matrix.shape[1]),
-            "als_factors": ALS_FACTORS,
-            "covisit_top_neighbors": COVISIT_TOP_NEIGHBORS,
+            "als_factors": als_params["factors"],
+            "covisit_top_neighbors": covisit_params["top_neighbors"],
         },
     }
 
     cfg.model_artifact.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(artifact, cfg.model_artifact)
+    joblib.dump(artifact_payload, cfg.model_artifact)
 
 
 def sanitize_metric_names_for_mlflow(metrics: dict[str, float | int]) -> dict[str, float]:
@@ -197,35 +197,39 @@ def sanitize_metric_names_for_mlflow(metrics: dict[str, float | int]) -> dict[st
     return sanitized_metrics
 
 
+def _build_mlflow_params() -> dict[str, float | int | str]:
+    return {
+        "model_name": model_params["name"],
+        "model_type": model_params["type"],
+        "weight_view": weights["view"],
+        "weight_addtocart": weights["addtocart"],
+        "weight_transaction": weights["transaction"],
+        "als_factors": als_params["factors"],
+        "als_iterations": als_params["iterations"],
+        "als_regularization": als_params["regularization"],
+        "als_alpha": als_params["alpha"],
+        "covisit_top_neighbors": covisit_params["top_neighbors"],
+        "hybrid_als_weight": hybrid_params["als_weight"],
+        "hybrid_covisit_weight": hybrid_params["covisit_weight"],
+        "hybrid_rrf_constant": hybrid_params["rrf_constant"],
+        "eval_test_days": eval_params["test_days"],
+        "eval_session_gap_hours": eval_params["session_gap_hours"],
+        "eval_k": eval_params["k"],
+        "eval_n_sessions": eval_params["n_sessions"],
+        "popular_items_count": popular_params["items_count"],
+    }
+
+
 def log_to_mlflow(metrics: dict[str, float | int]) -> None:
     if not cfg.mlflow_tracking_uri:
         logger.info("train: skip mlflow logging because tracking uri is empty")
         return
 
     mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
-    mlflow.set_experiment(cfg.s.mlflow_experiment)
+    mlflow.set_experiment(cfg.mlflow_experiment)
 
     with mlflow.start_run():
-        mlflow.log_params(
-            {
-                "weight_view": cfg.s.weight_view,
-                "weight_addtocart": cfg.s.weight_addtocart,
-                "weight_transaction": cfg.s.weight_transaction,
-                "als_factors": ALS_FACTORS,
-                "als_iterations": cfg.s.als_iterations,
-                "als_regularization": cfg.s.als_regularization,
-                "als_alpha": cfg.s.als_alpha,
-                "covisit_top_neighbors": COVISIT_TOP_NEIGHBORS,
-                "hybrid_als_weight": HYBRID_ALS_WEIGHT,
-                "hybrid_covisit_weight": HYBRID_COVISIT_WEIGHT,
-                "hybrid_rrf_constant": HYBRID_RRF_CONSTANT,
-                "eval_test_days": cfg.s.eval_test_days,
-                "eval_session_gap_hours": cfg.s.eval_session_gap_hours,
-                "eval_k": cfg.s.eval_k,
-                "eval_n_sessions": cfg.s.eval_n_sessions,
-            }
-        )
-
+        mlflow.log_params(_build_mlflow_params())
         mlflow.log_metrics(sanitize_metric_names_for_mlflow(metrics))
         mlflow.log_artifact(str(cfg.model_artifact))
 
@@ -237,14 +241,15 @@ def run_training() -> TrainingResult:
     logger.info("train: split by time")
     train_interactions, test_events, cutoff_timestamp = split_by_time(
         weighted_events=weighted_events,
-        test_days=cfg.s.eval_test_days,
+        test_days=eval_params["test_days"],
     )
 
     logger.info("train: build interaction matrix")
-    interaction_matrix, user_ids, item_ids = build_interaction_matrix(train_interactions)
+    interaction_matrix, item_ids = build_interaction_matrix(train_interactions)
 
     logger.info("train: build popularity ranking")
-    popular_items = build_item_popularity_ranking(train_interactions)
+    full_popular_items = build_item_popularity_ranking(train_interactions)
+    fallback_popular_items = full_popular_items[: popular_params["items_count"]]
 
     logger.info("train: load raw add-to-cart events")
     raw_addtocart_events = load_raw_addtocart_events()
@@ -255,15 +260,15 @@ def run_training() -> TrainingResult:
     logger.info("train: build co-visitation index")
     covisit_index = build_covisit_index(
         train_events=train_addtocart_events,
-        gap_hours=cfg.s.eval_session_gap_hours,
-        top_neighbors_per_item=COVISIT_TOP_NEIGHBORS,
+        gap_hours=eval_params["session_gap_hours"],
+        top_neighbors_per_item=covisit_params["top_neighbors"],
     )
 
     logger.info("train: sample sessions")
     sampled_sessions = sample_sessions(
-        test_events= test_events,
-        gap_hours=cfg.s.eval_session_gap_hours,
-        n_sessions=cfg.s.eval_n_sessions,
+        test_events=test_events,
+        gap_hours=eval_params["session_gap_hours"],
+        n_sessions=eval_params["n_sessions"],
         random_seed=42,
     )
 
@@ -282,24 +287,24 @@ def run_training() -> TrainingResult:
             item_ids=item_ids,
             item_id_to_index=item_id_to_index,
             covisit_index=covisit_index,
-            popular_items=popular_items,
+            popular_items=fallback_popular_items,
             cart_item_ids=cart_item_ids,
             k=k,
-            als_weight=HYBRID_ALS_WEIGHT,
-            covisit_weight=HYBRID_COVISIT_WEIGHT,
-            rrf_constant=HYBRID_RRF_CONSTANT,
+            als_weight=hybrid_params["als_weight"],
+            covisit_weight=hybrid_params["covisit_weight"],
+            rrf_constant=hybrid_params["rrf_constant"],
         ),
         sampled_sessions=sampled_sessions,
         item_catalog_ids=item_ids,
-        popular_items=popular_items,
-        k=cfg.s.eval_k,
+        popular_items=full_popular_items,
+        k=eval_params["k"],
     )
 
     logger.info("train: save model artifact")
     save_model_artifact(
         model=model,
         item_ids=item_ids,
-        popular_items=popular_items,
+        popular_items=fallback_popular_items,
         covisit_index=covisit_index,
         cutoff_timestamp=cutoff_timestamp,
         interaction_matrix=interaction_matrix,

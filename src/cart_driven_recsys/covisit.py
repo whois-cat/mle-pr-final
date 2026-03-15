@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-
 import pandas as pd
-
 from cart_driven_recsys.recommenders import build_sessions_from_events
 
 

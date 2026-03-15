@@ -2,6 +2,9 @@ set shell := ["bash", "-cu"]
 
 compose := "docker compose"
 
+init-dirs:
+    mkdir -p data/raw data/processed artifacts/models
+
 up:
     {{compose}} up -d
 
@@ -23,7 +26,7 @@ api:
     {{compose}} up -d recsys-api
 
 train:
-    {{compose}} exec airflow-webserver airflow dags trigger cart_recsys_train
+    {{compose}} exec airflow-api-server airflow dags trigger cart_recsys_train
 
 test:
     pytest -vv -ra --durations=10 --color=yes

@@ -1,0 +1,48 @@
+data:
+  events_file: events.csv
+  item_props_files:
+    - item_properties_part1.csv
+    - item_properties_part2.csv
+  category_tree_file: category_tree.csv
+
+processed:
+  events_clean_dirname: events_clean
+  purchases_filename: purchases.parquet
+  items_filename: items.parquet
+  categories_filename: categories.parquet
+  stats_filename: stats.json
+  success_filename: _SUCCESS
+  duckdb_filename: recsys.duckdb
+
+model:
+  name: als_v1
+  type: hybrid_als_covisit
+  artifact_filename: model.pkl
+
+weights:
+  view: 1.0
+  addtocart: 5.0
+  transaction: 10.0
+
+als:
+  factors: 128
+  iterations: 30
+  regularization: 0.01
+  alpha: 40.0
+
+covisit:
+  top_neighbors: 50
+
+hybrid:
+  als_weight: 0.7
+  covisit_weight: 0.3
+  rrf_constant: 60
+
+eval:
+  test_days: 30
+  session_gap_hours: 4
+  k: 10
+  n_sessions: 5000
+
+popular:
+  items_count: 500

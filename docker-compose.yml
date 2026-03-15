@@ -4,8 +4,9 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
   AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY}
   PYTHONPATH: /opt/recsys/src
-  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-  CHUNKSIZE: ${CHUNKSIZE}
+  RECSYS_MLFLOW_TRACKING_URI: ${RECSYS_MLFLOW_TRACKING_URI}
+  RECSYS_MLFLOW_EXPERIMENT: ${RECSYS_MLFLOW_EXPERIMENT}
+  RECSYS_PARAMS_FILE: ${RECSYS_PARAMS_FILE}
   OPENBLAS_NUM_THREADS: "1"
 
 x-airflow-common: &airflow-common
@@ -21,6 +22,7 @@ x-airflow-common: &airflow-common
     - ./src:/opt/recsys/src:ro
     - ./data:/opt/recsys/data
     - ./artifacts:/opt/recsys/artifacts
+    - ./params.yaml:/opt/recsys/params.yaml:ro
   depends_on:
     postgres:
       condition: service_healthy
@@ -133,16 +135,18 @@ services:
       dockerfile: Dockerfile
     environment:
       PYTHONPATH: /opt/recsys/src
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
-      API_HOST: ${API_HOST}
-      API_PORT: ${API_PORT}
-      CHUNKSIZE: ${CHUNKSIZE}
+      RECSYS_MLFLOW_TRACKING_URI: ${RECSYS_MLFLOW_TRACKING_URI}
+      RECSYS_MLFLOW_EXPERIMENT: ${RECSYS_MLFLOW_EXPERIMENT}
+      RECSYS_API_HOST: ${RECSYS_API_HOST}
+      RECSYS_API_PORT: ${RECSYS_API_PORT}
+      RECSYS_PARAMS_FILE: ${RECSYS_PARAMS_FILE}
       OPENBLAS_NUM_THREADS: "1"
     ports:
       - "8000:8000"
     volumes:
       - ./artifacts:/opt/recsys/artifacts
       - ./data:/opt/recsys/data
+      - ./params.yaml:/opt/recsys/params.yaml:ro
     depends_on:
       mlflow:
         condition: service_healthy
