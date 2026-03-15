@@ -8,7 +8,7 @@ from airflow.decorators import dag, task
     dag_id="cart_recsys_etl",
     description="etl",
     schedule=None,
-    start_date=datetime(2024, 1, 1),
+    start_date=datetime(2026, 1, 1),
     catchup=False,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=5)},
     tags=["recsys", "etl"],
@@ -37,7 +37,6 @@ def cart_recsys_etl_dag():
     @task
     def run_etl() -> None:
         from cart_driven_recsys.etl import run_all
-
         run_all()
 
     @task
@@ -53,7 +52,6 @@ def cart_recsys_etl_dag():
         ]
 
         missing_outputs = [str(path) for path in required_outputs if not path.exists()]
-
         if missing_outputs:
             raise FileNotFoundError(f"missing outputs: {missing_outputs}")
 

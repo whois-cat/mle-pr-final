@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-
 from airflow.decorators import dag, task
 
 
@@ -29,7 +28,6 @@ def cart_recsys_train_dag():
         ]
 
         missing_paths = [str(path) for path in required_paths if not path.exists()]
-
         if missing_paths:
             raise FileNotFoundError(f"missing processed inputs: {missing_paths}")
 
